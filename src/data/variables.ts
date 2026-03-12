@@ -1,12 +1,12 @@
 /**
  * Variables Configuration
  * =======================
- * 
+ *
  * CENTRAL PLACE TO DEFINE ALL SHARED VARIABLES
- * 
+ *
  * This file defines all variables that can be shared across sections.
  * AI agents should read this file to understand what variables are available.
- * 
+ *
  * USAGE:
  * 1. Define variables here with their default values and metadata
  * 2. Use them in any section with: const x = useVar('variableName', defaultValue)
@@ -53,108 +53,164 @@ export interface VariableDefinition {
 
 /**
  * =====================================================
- * 🎯 DEFINE YOUR VARIABLES HERE
+ * 🎯 DERIVATIVES LESSON VARIABLES
  * =====================================================
- * 
- * SUPPORTED TYPES:
- * 
- * 1. NUMBER (slider):
- *    { defaultValue: 5, type: 'number', min: 0, max: 10, step: 1 }
- * 
- * 2. TEXT (free text):
- *    { defaultValue: 'Hello', type: 'text', placeholder: 'Enter text...' }
- * 
- * 3. SELECT (dropdown):
- *    { defaultValue: 'sine', type: 'select', options: ['sine', 'cosine', 'tangent'] }
- * 
- * 4. BOOLEAN (toggle):
- *    { defaultValue: true, type: 'boolean' }
- * 
- * 5. ARRAY (list of numbers):
- *    { defaultValue: [1, 2, 3], type: 'array' }
- * 
- * 6. OBJECT (complex data):
- *    { defaultValue: { x: 5, y: 10 }, type: 'object', schema: '{ x: number, y: number }' }
  */
 export const variableDefinitions: Record<string, VariableDefinition> = {
-    // ========================================
-    // ADD YOUR VARIABLES HERE
-    // ========================================
-
-    // Uncomment and modify these examples for your lesson:
-
-    /*
     // ─────────────────────────────────────────
-    // NUMBER - Use with sliders
+    // SECTION 1: The Speed Problem
     // ─────────────────────────────────────────
-    myValue: {
-        defaultValue: 5,
+    startTime: {
+        defaultValue: 1,
         type: 'number',
-        label: 'My Value',
-        description: 'A number that controls something',
-        unit: 'm',           // optional unit display
+        label: 'Start Time',
+        description: 'Starting time point for measuring speed',
+        unit: 's',
         min: 0,
-        max: 10,
+        max: 4,
         step: 0.5,
+        color: '#62D0AD',
+    },
+    endTime: {
+        defaultValue: 3,
+        type: 'number',
+        label: 'End Time',
+        description: 'Ending time point for measuring speed',
+        unit: 's',
+        min: 1,
+        max: 5,
+        step: 0.5,
+        color: '#8E90F5',
+    },
+    speedHighlight: {
+        defaultValue: '',
+        type: 'linkedHighlight',
+        label: 'Speed Highlight',
+        description: 'Active highlight for speed visualization',
+        color: '#62D0AD',
     },
 
     // ─────────────────────────────────────────
-    // TEXT - Free text input
+    // SECTION 2: Getting Closer
     // ─────────────────────────────────────────
-    lessonTitle: {
-        defaultValue: 'My Lesson',
+    intervalSize: {
+        defaultValue: 2,
+        type: 'number',
+        label: 'Interval Size',
+        description: 'Size of the time interval for measuring speed',
+        unit: 's',
+        min: 0.1,
+        max: 3,
+        step: 0.1,
+        color: '#F7B23B',
+    },
+    fixedPoint: {
+        defaultValue: 2,
+        type: 'number',
+        label: 'Fixed Point',
+        description: 'The fixed time point we are approaching',
+        unit: 's',
+        min: 1,
+        max: 4,
+        step: 0.5,
+        color: '#AC8BF9',
+    },
+
+    // ─────────────────────────────────────────
+    // SECTION 3: Slope of a Curve
+    // ─────────────────────────────────────────
+    tangentPoint: {
+        defaultValue: 2,
+        type: 'number',
+        label: 'Tangent Point',
+        description: 'X-coordinate where we draw the tangent line',
+        unit: '',
+        min: 0.5,
+        max: 4,
+        step: 0.1,
+        color: '#62D0AD',
+    },
+    secantDistance: {
+        defaultValue: 1.5,
+        type: 'number',
+        label: 'Secant Distance',
+        description: 'Distance between secant line points',
+        unit: '',
+        min: 0.1,
+        max: 2,
+        step: 0.1,
+        color: '#F7B23B',
+    },
+    slopeHighlight: {
+        defaultValue: '',
+        type: 'linkedHighlight',
+        label: 'Slope Highlight',
+        description: 'Active highlight for slope visualization',
+        color: '#8E90F5',
+    },
+
+    // ─────────────────────────────────────────
+    // SECTION 4: The Derivative
+    // ─────────────────────────────────────────
+    derivativePoint: {
+        defaultValue: 1.5,
+        type: 'number',
+        label: 'Derivative Point',
+        description: 'X-coordinate for exploring the derivative',
+        unit: '',
+        min: -2,
+        max: 3,
+        step: 0.1,
+        color: '#62D0AD',
+    },
+    derivativeHighlight: {
+        defaultValue: '',
+        type: 'linkedHighlight',
+        label: 'Derivative Highlight',
+        description: 'Active highlight for derivative visualization',
+        color: '#62D0AD',
+    },
+
+    // ─────────────────────────────────────────
+    // ASSESSMENT QUESTIONS
+    // ─────────────────────────────────────────
+    answerSpeedFormula: {
+        defaultValue: '',
         type: 'text',
-        label: 'Lesson Title',
-        description: 'The title of your lesson',
-        placeholder: 'Enter a title...',
+        label: 'Speed Formula Answer',
+        description: 'Student answer for the speed formula question',
+        placeholder: '???',
+        correctAnswer: 'distance',
+        color: '#62D0AD',
     },
-
-    // ─────────────────────────────────────────
-    // SELECT - Dropdown with options
-    // ─────────────────────────────────────────
-    difficulty: {
-        defaultValue: 'medium',
+    answerInstantaneous: {
+        defaultValue: '',
         type: 'select',
-        label: 'Difficulty',
-        description: 'The difficulty level of the lesson',
-        options: ['easy', 'medium', 'hard', 'expert'],
+        label: 'Instantaneous Answer',
+        description: 'Student answer about instantaneous speed',
+        placeholder: '???',
+        correctAnswer: 'smaller',
+        options: ['larger', 'smaller', 'the same'],
+        color: '#8E90F5',
     },
-
-    // ─────────────────────────────────────────
-    // BOOLEAN - Toggle switch
-    // ─────────────────────────────────────────
-    showHints: {
-        defaultValue: true,
-        type: 'boolean',
-        label: 'Show Hints',
-        description: 'Toggle to show or hide hints',
+    answerTangentSlope: {
+        defaultValue: '',
+        type: 'text',
+        label: 'Tangent Slope Answer',
+        description: 'Student answer for what tangent slope represents',
+        placeholder: '???',
+        correctAnswer: 'instantaneous',
+        color: '#F7B23B',
     },
-
-    // ─────────────────────────────────────────
-    // ARRAY - List of numbers
-    // ─────────────────────────────────────────
-    dataPoints: {
-        defaultValue: [1, 4, 9, 16, 25],
-        type: 'array',
-        label: 'Data Points',
-        description: 'Y-values for plotting a graph',
+    answerDerivativeValue: {
+        defaultValue: '',
+        type: 'text',
+        label: 'Derivative Value Answer',
+        description: 'Student answer for derivative calculation',
+        placeholder: '???',
+        correctAnswer: '4',
+        color: '#AC8BF9',
     },
-
-    // ─────────────────────────────────────────
-    // OBJECT - Complex structured data
-    // ─────────────────────────────────────────
-    graphSettings: {
-        defaultValue: { 
-            xMin: -10, 
-            xMax: 10, 
-            showGrid: true 
-        },
-        type: 'object',
-        label: 'Graph Settings',
-        description: 'Configuration for the graph display',
-        schema: '{ xMin: number, xMax: number, showGrid: boolean }',
-    },
-    */
 };
 
 /**
