@@ -2,7 +2,7 @@
   "name": "mathvibe",
   "private": true,
   "version": "1.0.0",
-  "homepage": "https://test-15.mathvibe.space/",
+  "homepage": "https://understanding-derivatives.mathvibe.space/",
   "type": "module",
   "scripts": {
     "dev": "vite",
