@@ -2,6 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useEditing } from '@/contexts/EditingContext';
 import { COLOR_PRESETS_STANDARD, CLOZE_BG_OPACITY, BRAND_GREEN } from './editorColors';
 import { BgColorPicker } from './BgColorPicker';
+import { VariableNamePicker } from './VariableNamePicker';
+import { ClozeFeedbackFields } from './ClozeFeedbackFields';
+import type { ClozeFeedback } from '@/components/atoms/text/feedbackContext';
 
 export const ClozeChoiceEditorModal: React.FC = () => {
     const { editingClozeChoice, closeClozeChoiceEditor, saveClozeChoiceEdit } = useEditing();
@@ -13,6 +16,8 @@ export const ClozeChoiceEditorModal: React.FC = () => {
     const [color, setColor] = useState('#3B82F6');
     const [bgColor, setBgColor] = useState('rgba(59, 130, 246, 0.35)');
     const [error, setError] = useState<string | null>(null);
+    // null when the blank has no InlineFeedback around it
+    const [feedback, setFeedback] = useState<ClozeFeedback | null>(null);
 
     const COLOR_PRESETS = COLOR_PRESETS_STANDARD;
 
@@ -25,6 +30,7 @@ export const ClozeChoiceEditorModal: React.FC = () => {
             setPlaceholder(editingClozeChoice.placeholder || '???');
             setColor(editingClozeChoice.color || '#3B82F6');
             setBgColor(editingClozeChoice.bgColor || 'rgba(59, 130, 246, 0.35)');
+            setFeedback(editingClozeChoice.feedback ?? null);
             setError(null);
         }
     }, [editingClozeChoice]);
@@ -34,11 +40,16 @@ export const ClozeChoiceEditorModal: React.FC = () => {
             setError('Correct answer is required');
             return false;
         }
-        if (options.length < 2) {
+        if (options.some(option => !option.trim())) {
+            setError('All options must have text');
+            return false;
+        }
+        const normalizedOptions = options.map(option => option.trim());
+        if (normalizedOptions.length < 2) {
             setError('At least 2 options are required');
             return false;
         }
-        if (!options.some(o => o.trim() === correctAnswer.trim())) {
+        if (!normalizedOptions.includes(correctAnswer.trim())) {
             setError('Correct answer must be one of the options');
             return false;
         }
@@ -52,12 +63,13 @@ export const ClozeChoiceEditorModal: React.FC = () => {
         saveClozeChoiceEdit({
             varName: varName || undefined,
             correctAnswer,
-            options: options.filter(o => o.trim() !== ''),
+            options: options.map(option => option.trim()),
             placeholder: placeholder || undefined,
             color,
             bgColor: bgColor || undefined,
+            ...(feedback ? { feedback } : {}),
         });
-    }, [varName, correctAnswer, options, placeholder, color, bgColor, validate, saveClozeChoiceEdit]);
+    }, [varName, correctAnswer, options, placeholder, color, bgColor, feedback, validate, saveClozeChoiceEdit]);
 
     const handleCancel = useCallback(() => {
         closeClozeChoiceEditor();
@@ -99,7 +111,7 @@ export const ClozeChoiceEditorModal: React.FC = () => {
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                         </svg>
-                        Edit Cloze Choice
+                        {editingClozeChoice?.isNew ? 'Add Cloze Choice' : 'Edit Cloze Choice'}
                     </h2>
                     <button
                         onClick={handleCancel}
@@ -114,22 +126,12 @@ export const ClozeChoiceEditorModal: React.FC = () => {
                 {/* Content */}
                 <div className="flex-1 overflow-auto p-4 space-y-4">
                     {/* Variable Name */}
-                    <div>
-                        <label className="block text-sm font-medium mb-2">
-                            Variable Name <span className="text-muted-foreground">(optional)</span>
-                        </label>
-                        <input
-                            type="text"
-                            value={varName}
-                            onChange={(e) => setVarName(e.target.value)}
-                            className="w-full px-3 py-2 text-sm bg-muted/30 border rounded-lg focus:outline-none focus:ring-2"
-                            style={{ '--tw-ring-color': BRAND_GREEN } as React.CSSProperties}
-                            placeholder="e.g., shapeAnswer"
-                        />
-                        <p className="text-xs text-muted-foreground mt-1">
-                            If set, the student's selection will be synced with global state
-                        </p>
-                    </div>
+                    <VariableNamePicker
+                        value={varName}
+                        onChange={setVarName}
+                        helperText="Store the student's selection in a global variable"
+                        customPlaceholder="e.g., shapeAnswer"
+                    />
 
                     {/* Options */}
                     <div>
@@ -203,6 +205,8 @@ export const ClozeChoiceEditorModal: React.FC = () => {
                             placeholder="Select from options above or type here"
                         />
                     </div>
+
+                    {feedback && <ClozeFeedbackFields value={feedback} onChange={setFeedback} />}
 
                     {/* Placeholder */}
                     <div>
@@ -300,10 +304,13 @@ export const ClozeChoiceEditorModal: React.FC = () => {
                         Cancel
                     </button>
                     <button
-                        onClick={handleSave}
+                        onMouseDown={(e) => {
+                            e.preventDefault();
+                            handleSave();
+                        }}
                         className={`px-4 py-2 text-sm font-medium bg-[${BRAND_GREEN}] text-white rounded-lg hover:bg-[${BRAND_GREEN}]/90 transition-colors`}
                     >
-                        Apply Changes
+                        {editingClozeChoice?.isNew ? 'Add Component' : 'Apply Changes'}
                     </button>
                 </div>
             </div>

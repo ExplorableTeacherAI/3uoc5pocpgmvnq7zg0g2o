@@ -12,6 +12,7 @@ import {
     Maximize2,
     type LucideProps,
 } from "lucide-react";
+import { useVar } from "@/stores/variableStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -301,9 +302,11 @@ function getGestureAnimation(
         case "drag-circular":
             return {
                 animate: {
-                    rotate: [0, 360],
+                    x: [0, 20, 28, 20, 0, -20, -28, -20, 0],
+                    y: [0, -12, 0, 12, 0, -12, 0, 12, 0],
+                    scale: [1, 0.92, 0.92, 0.92, 0.92, 0.92, 0.92, 0.92, 1],
                 },
-                transition: { ...transition, duration: 2.5 },
+                transition: { ...transition, duration: 2.8 },
             };
 
         case "pinch":
@@ -344,27 +347,27 @@ function getGestureAnimation(
 function getDefaultLabel(gesture: GestureType): string {
     switch (gesture) {
         case "drag":
-            return "Drag to explore";
+            return "Click and drag to reposition elements";
         case "drag-horizontal":
-            return "Drag left & right";
+            return "Drag left and right to adjust the value";
         case "drag-vertical":
-            return "Drag up & down";
+            return "Drag up and down to adjust the value";
         case "drag-circular":
-            return "Drag around the circle";
+            return "Drag along the circular path to explore";
         case "click":
-            return "Click to interact";
+            return "Click to interact with this element";
         case "hover":
-            return "Hover to discover";
+            return "Hover over elements to reveal details";
         case "scroll":
-            return "Scroll to explore";
+            return "Scroll up and down to explore more";
         case "pinch":
-            return "Pinch to zoom";
+            return "Pinch to zoom in and out";
         case "rotate":
-            return "Rotate to adjust";
+            return "Rotate to adjust the angle";
         case "orbit-3d":
-            return "Drag to orbit";
+            return "Click and drag to orbit the 3D view";
         default:
-            return "Interact!";
+            return "Interact with this visualization";
     }
 }
 
@@ -485,6 +488,26 @@ export interface HintStep {
      * ```
      */
     dragPath?: DragPathConfig;
+    
+    /**
+     * Variable name to watch for step completion.
+     * When specified, the step only completes when the variable reaches the target value.
+     * @example "fbDemoTheta" for watching the angle variable
+     */
+    completionVar?: string;
+    
+    /**
+     * Target value the variable should reach for step completion.
+     * @example 90 for when the angle should be at 90 degrees
+     */
+    completionValue?: number;
+    
+    /**
+     * Tolerance for completion check (±tolerance).
+     * @default 10
+     * @example 15 means the step completes when value is within ±15 of completionValue
+     */
+    completionTolerance?: number;
 }
 
 export interface InteractionHintSequenceProps {
@@ -522,6 +545,8 @@ export interface InteractionHintSequenceProps {
      * Default: "#62D0AD".
      */
     color?: string;
+    /** Called when the full sequence finishes or is externally dismissed. */
+    onSequenceComplete?: () => void;
 }
 
 /**
@@ -585,6 +610,7 @@ export function InteractionHintSequence({
     alwaysShow = false,
     delay = 800,
     color,
+    onSequenceComplete,
 }: InteractionHintSequenceProps) {
     const storageKey = `interaction-hint-seq::${hintKey}`;
     const isControlled = controlledStep !== undefined;
@@ -593,6 +619,7 @@ export function InteractionHintSequence({
     const [internalStep, setInternalStep] = useState(0);
     const [visible, setVisible] = useState(false);
     const [listenerReady, setListenerReady] = useState(false);
+    const [dismissed, setDismissed] = useState(false);
 
     // Ref to locate our own DOM node and find the parent container
     const hintRef = useRef<HTMLDivElement>(null);
@@ -600,6 +627,19 @@ export function InteractionHintSequence({
     // Determine the active step index
     const activeStep = isControlled ? controlledStep : internalStep;
     const isComplete = activeStep >= steps.length;
+    
+    // Get current step's completion condition
+    const currentStepData = steps[Math.min(activeStep, steps.length - 1)];
+    const completionVar = currentStepData?.completionVar;
+    const completionValue = currentStepData?.completionValue;
+    const completionTolerance = currentStepData?.completionTolerance ?? 15;
+    
+    // Watch the completion variable (if specified)
+    const watchedValue = useVar(completionVar ?? '', null) as number | null;
+
+    useEffect(() => {
+        setDismissed(false);
+    }, [hintKey]);
 
     // On mount: clear stale localStorage, check sessionStorage
     useEffect(() => {
@@ -631,6 +671,18 @@ export function InteractionHintSequence({
         return () => clearTimeout(timer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [alwaysShow, delay, storageKey, steps.length]);
+
+    useEffect(() => {
+        const handleDismissAll = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail?.exceptHintKey === hintKey) return;
+            setDismissed(true);
+            setVisible(false);
+        };
+
+        document.addEventListener('dismiss-interaction-hints', handleDismissAll);
+        return () => document.removeEventListener('dismiss-interaction-hints', handleDismissAll);
+    }, [hintKey]);
 
     // Delay attaching interaction listeners after hint becomes visible
     // to avoid programmatic events from Mafs/Three.js during initialization
@@ -678,29 +730,78 @@ export function InteractionHintSequence({
                 }
             }
         }
-    }, [activeStep, isControlled, onStepComplete, steps.length, alwaysShow, storageKey]);
+    }, [activeStep, isControlled, onStepComplete, steps.length, alwaysShow, storageKey, onSequenceComplete]);
 
-    // Listen for user interaction on the parent container
     useEffect(() => {
+        if (isComplete) {
+            onSequenceComplete?.();
+        }
+    }, [isComplete, onSequenceComplete]);
+    
+    // Watch for completion condition being met
+    useEffect(() => {
+        if (!visible || isComplete || !listenerReady) return;
+        if (completionVar === undefined || completionValue === undefined) return;
+        if (watchedValue === null) return;
+        
+        // Check if the watched value is within tolerance of the completion value
+        const diff = Math.abs(watchedValue - completionValue);
+        if (diff <= completionTolerance) {
+            // Small delay to let the user see the result before advancing
+            const timer = setTimeout(() => {
+                handleStepInteraction();
+            }, 400);
+            return () => clearTimeout(timer);
+        }
+    }, [watchedValue, completionVar, completionValue, completionTolerance, visible, isComplete, listenerReady, handleStepInteraction]);
+
+    // Listen for user interaction on the visualization container (only for steps WITHOUT completion conditions)
+    useEffect(() => {
+        // Skip if the current step has a completion condition - it will auto-advance when condition is met
+        if (completionVar !== undefined && completionValue !== undefined) return;
+        
         if (!listenerReady || isComplete) return;
 
         const hintEl = hintRef.current;
-        const parent = hintEl?.parentElement;
-        if (!parent) return;
+        if (!hintEl) return;
+
+        // Walk up to find the actual visualization container
+        // Look for either position:relative container or data-block-id element
+        let container: HTMLElement | null = hintEl.parentElement;
+        while (container) {
+            const style = window.getComputedStyle(container);
+            const hasRelativePosition = style.position === 'relative';
+            const isBlockContainer = container.hasAttribute('data-block-id');
+            
+            // Stop at the first relative-positioned container that's not just a small wrapper
+            if (hasRelativePosition && container.offsetWidth > 100 && container.offsetHeight > 100) {
+                break;
+            }
+            if (isBlockContainer) {
+                break;
+            }
+            container = container.parentElement;
+        }
+
+        if (!container) {
+            container = hintEl.parentElement;
+        }
+        if (!container) return;
 
         const handleInteraction = () => handleStepInteraction();
 
         // Use capture phase to catch events before child elements (like Mafs canvas) can stop propagation
-        parent.addEventListener("pointerdown", handleInteraction, { once: true, capture: true });
-        parent.addEventListener("touchstart", handleInteraction, { once: true, capture: true });
+        container.addEventListener("pointerdown", handleInteraction, { once: true, capture: true });
+        container.addEventListener("touchstart", handleInteraction, { once: true, capture: true });
         return () => {
-            parent.removeEventListener("pointerdown", handleInteraction, { capture: true });
-            parent.removeEventListener("touchstart", handleInteraction, { capture: true });
+            container?.removeEventListener("pointerdown", handleInteraction, { capture: true });
+            container?.removeEventListener("touchstart", handleInteraction, { capture: true });
         };
-    }, [listenerReady, isComplete, handleStepInteraction]);
+    }, [listenerReady, isComplete, handleStepInteraction, completionVar, completionValue]);
 
     // Don't render if sequence is complete (and not alwaysShow)
-    if (isComplete && !alwaysShow) return null;
+    if (dismissed) return null;
+    if (isComplete) return null;
     if (!visible) return null;
 
     // Current step data
@@ -719,97 +820,109 @@ export function InteractionHintSequence({
     return (
         <AnimatePresence mode="wait">
             {!isComplete && (
-                <motion.div
-                    key={`step-${activeStep}`}
-                    ref={hintRef}
-                    className="absolute z-50 pointer-events-none select-none"
-                    style={{
-                        left: posX,
-                        top: posY,
-                        transform: "translate(-50%, -50%)",
-                    }}
-                    initial={{ opacity: 0, scale: 0.7 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.7 }}
-                    transition={{ duration: 0.4, ease: "easeOut" }}
-                >
-                    {/* Trail dots for drag gestures */}
-                    <DragTrail color={accentColor} gesture={step.gesture} dragPath={step.dragPath} />
-
-                    {/* Ripple for click gesture */}
-                    <ClickRipple color={accentColor} gesture={step.gesture} />
-
-                    {/* Animated gesture icon */}
+                <>
+                    {/* ── Icon overlay — positioned inside the visualization ── */}
                     <motion.div
-                        className="flex flex-col items-center gap-1.5"
-                        {...gestureAnim}
+                        key={`icon-${activeStep}`}
+                        ref={hintRef}
+                        className="absolute z-50 pointer-events-none select-none"
+                        style={{
+                            left: posX,
+                            top: posY,
+                            transform: "translate(-50%, -50%)",
+                        }}
+                        initial={{ opacity: 0, scale: 0.7 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.7 }}
+                        transition={{ duration: 0.4, ease: "easeOut" }}
                     >
-                        <div
-                            className="rounded-full p-2"
-                            style={{
-                                background: `radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0.7) 100%)`,
-                                boxShadow: `0 4px 20px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.04)`,
-                            }}
-                        >
-                            <GestureIcon
-                                color={accentColor}
-                                size={32}
-                                strokeWidth={1.8}
-                                style={{ filter: `drop-shadow(0 2px 6px rgba(0,0,0,0.25))` }}
-                            />
-                        </div>
+                        {/* Trail dots for drag gestures */}
+                        <DragTrail color={accentColor} gesture={step.gesture} dragPath={step.dragPath} />
 
-                        {/* Label pill */}
-                        <div
-                            className="whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium"
-                            style={{
-                                background: `rgba(255,255,255,0.92)`,
-                                color: "#374151",
-                                boxShadow: `0 2px 8px rgba(0,0,0,0.1)`,
-                                backdropFilter: "blur(8px)",
-                                border: `1px solid rgba(0,0,0,0.06)`,
-                            }}
+                        {/* Ripple for click gesture */}
+                        <ClickRipple color={accentColor} gesture={step.gesture} />
+
+                        {/* Animated gesture icon — only the icon, no text */}
+                        <motion.div
+                            className="flex items-center justify-center"
+                            {...gestureAnim}
                         >
-                            {displayLabel}
-                        </div>
+                            <div
+                                className="rounded-full p-2"
+                                style={{
+                                    background: `radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0.7) 100%)`,
+                                    boxShadow: `0 4px 20px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.04)`,
+                                }}
+                            >
+                                <GestureIcon
+                                    color={accentColor}
+                                    size={32}
+                                    strokeWidth={1.8}
+                                    style={{ filter: `drop-shadow(0 2px 6px rgba(0,0,0,0.25))` }}
+                                />
+                            </div>
+                        </motion.div>
                     </motion.div>
 
-                    {/* Step indicator pill */}
-                    {totalSteps > 1 && (
+                    {/* ── Instruction bar — in normal flow so it stacks BELOW the
+                        figure content (drawing + sliders) instead of overlaying
+                        whatever sits at the bottom of the relative container ── */}
+                    <motion.div
+                        key={`label-${activeStep}`}
+                        className="relative z-50 w-full pointer-events-none select-none"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 4 }}
+                        transition={{ duration: 0.3, ease: "easeOut", delay: 0.1 }}
+                    >
                         <div
-                            className="flex items-center justify-center gap-1.5 mt-2"
+                            className="flex items-center justify-center gap-2 px-4 py-2"
+                            style={{
+                                background: "rgba(249, 250, 251, 0.92)",
+                                borderTop: "1px solid rgba(0,0,0,0.06)",
+                            }}
                         >
-                            {/* Step dots */}
-                            <div className="flex items-center gap-1">
-                                {steps.map((_, i) => (
-                                    <div
-                                        key={i}
-                                        className="rounded-full transition-all duration-300"
-                                        style={{
-                                            width: i === activeStep ? 16 : 6,
-                                            height: 6,
-                                            borderRadius: i === activeStep ? 3 : 3,
-                                            backgroundColor: i < activeStep
-                                                ? accentColor
-                                                : i === activeStep
+                            {/* Step dots (before text when multi-step) */}
+                            {totalSteps > 1 && (
+                                <div className="flex items-center gap-1 shrink-0">
+                                    {steps.map((_, i) => (
+                                        <div
+                                            key={i}
+                                            className="rounded-full transition-all duration-300"
+                                            style={{
+                                                width: i === activeStep ? 14 : 5,
+                                                height: 5,
+                                                borderRadius: 3,
+                                                backgroundColor: i < activeStep
                                                     ? accentColor
-                                                    : "rgba(156, 163, 175, 0.4)",
-                                            opacity: i <= activeStep ? 1 : 0.5,
-                                        }}
-                                    />
-                                ))}
-                            </div>
+                                                    : i === activeStep
+                                                        ? accentColor
+                                                        : "rgba(156, 163, 175, 0.35)",
+                                                opacity: i <= activeStep ? 1 : 0.5,
+                                            }}
+                                        />
+                                    ))}
+                                </div>
+                            )}
 
-                            {/* Step counter text */}
+                            {/* Instruction text */}
                             <span
-                                className="text-[10px] font-medium ml-1"
-                                style={{ color: "rgba(107, 114, 128, 0.8)" }}
+                                className="text-xs font-medium"
+                                style={{ color: "#6b7280" }}
                             >
-                                {stepNumber}/{totalSteps}
+                                {totalSteps > 1 && (
+                                    <span
+                                        className="font-semibold mr-1"
+                                        style={{ color: accentColor }}
+                                    >
+                                        Step {stepNumber}:
+                                    </span>
+                                )}
+                                {displayLabel}
                             </span>
                         </div>
-                    )}
-                </motion.div>
+                    </motion.div>
+                </>
             )}
         </AnimatePresence>
     );

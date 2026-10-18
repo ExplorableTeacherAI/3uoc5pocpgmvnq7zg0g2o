@@ -77,8 +77,11 @@ export const Block = ({
     const [isAnnotating, setIsAnnotating] = useState(false);
     const [isAsking, setIsAsking] = useState(false);
     const [askText, setAskText] = useState("");
+    const [dropdownOpen, setDropdownOpen] = useState(false);
     const blockRef = useRef<HTMLDivElement>(null);
     const askTextareaRef = useRef<HTMLTextAreaElement>(null);
+    const isDragActiveRef = useRef(false);
+    const dragStartPos = useRef<{ x: number; y: number } | null>(null);
     const { isPreview: appIsPreview } = useAppMode();
 
     const paddingClasses = {
@@ -275,7 +278,7 @@ export const Block = ({
             >
                 {/* Magic wand icon - shown on visualization blocks in editor mode */}
                 {!isPreview && !appIsPreview && hasVisualization && (
-                    <div className="absolute top-2 right-2 z-20 opacity-0 group-hover:opacity-100 transition-all duration-200">
+                    <div className="absolute top-2 right-2 z-20 block-touch-controls opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-all duration-200">
                         <Tooltip>
                             <TooltipTrigger asChild>
                                 <Button
@@ -300,7 +303,7 @@ export const Block = ({
 
                 {/* Hover controls - hidden in preview mode */}
                 {!isPreview && (
-                    <div className="relative z-10 flex items-center gap-px opacity-0 group-hover:opacity-100 transition-opacity pt-1">
+                    <div className="relative z-10 flex items-center gap-px block-touch-controls opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity pt-1">
                         <Tooltip>
                             <TooltipTrigger asChild>
                                 <Button
@@ -325,7 +328,11 @@ export const Block = ({
                             </TooltipContent>
                         </Tooltip>
 
-                        <DropdownMenu>
+                        <DropdownMenu open={dropdownOpen} onOpenChange={(open) => {
+                            // Only allow opening if not dragging
+                            if (open && isDragActiveRef.current) return;
+                            setDropdownOpen(open);
+                        }}>
                             <Tooltip>
                                 <TooltipTrigger asChild>
                                     <DropdownMenuTrigger asChild>
@@ -334,10 +341,49 @@ export const Block = ({
                                             size="icon"
                                             className="h-7 w-7 cursor-grab active:cursor-grabbing hover:bg-[#D4EDE5] hover:text-[#0D7377]"
                                             onPointerDown={(e) => {
+                                                // Record start position to distinguish click vs drag
+                                                dragStartPos.current = { x: e.clientX, y: e.clientY };
+                                                isDragActiveRef.current = false;
+
                                                 // Pass the event to DragControls
                                                 if (dragControls) {
                                                     dragControls.start(e);
                                                 }
+
+                                                const onPointerMove = (moveEvent: PointerEvent) => {
+                                                    if (!dragStartPos.current) return;
+                                                    const dx = moveEvent.clientX - dragStartPos.current.x;
+                                                    const dy = moveEvent.clientY - dragStartPos.current.y;
+                                                    // If moved more than 5px, it's a drag
+                                                    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                                                        isDragActiveRef.current = true;
+                                                        // Close dropdown if it somehow opened
+                                                        setDropdownOpen(false);
+                                                    }
+                                                };
+
+                                                const onPointerUp = () => {
+                                                    document.removeEventListener('pointermove', onPointerMove);
+                                                    document.removeEventListener('pointerup', onPointerUp);
+
+                                                    // If it was a click (no significant movement), open the dropdown
+                                                    if (!isDragActiveRef.current) {
+                                                        setDropdownOpen(true);
+                                                    }
+                                                    // Reset
+                                                    dragStartPos.current = null;
+                                                    // Allow a short delay before resetting isDragActive so the dropdown
+                                                    // onOpenChange doesn't immediately re-open it
+                                                    setTimeout(() => {
+                                                        isDragActiveRef.current = false;
+                                                    }, 100);
+                                                };
+
+                                                document.addEventListener('pointermove', onPointerMove);
+                                                document.addEventListener('pointerup', onPointerUp);
+
+                                                // Prevent the default Radix dropdown trigger behavior (which opens on pointerdown)
+                                                e.preventDefault();
                                             }}
                                         >
                                             <GripVertical className="h-4 w-4" />

@@ -1,7 +1,12 @@
-import React from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { useVar } from '@/stores/variableStore';
-import { cn } from '@/lib/utils';
+import { isRestoredAnswer } from "@/lib/activityRecovery";
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useVar, useVariableStore } from '@/stores/variableStore';
+import { cn, isAnswerCorrect } from '@/lib/utils';
+import { useAppMode } from '@/contexts/AppModeContext';
+import { useEditing } from '@/contexts/EditingContext';
+import type { HintStep } from '@/components/atoms/visual/InteractionHint';
+import { encodeMarkerJson } from '@/lib/inlineMarkers';
+import { InlineFeedbackContext, type ClozeFeedback } from './feedbackContext';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InlineFeedback — inline feedback for cloze inputs / choices
@@ -9,11 +14,44 @@ import { cn } from '@/lib/utils';
 
 export type FeedbackPosition = 'terminal' | 'mid' | 'standalone';
 
+/** Configuration for linking feedback to a section in the lesson */
+export interface SectionLink {
+    /** Block ID to scroll to */
+    blockId: string;
+    /** Display label for the link */
+    label: string;
+}
+
+/** Configuration for showing an animated visualization hint on wrong answer */
+export interface VisualizationHintConfig {
+    /** Block ID of the visualization to scroll to */
+    blockId: string;
+    /** The hint key to use for the InteractionHintSequence */
+    hintKey: string;
+    /** Steps for the animated hint overlay */
+    steps: HintStep[];
+    /** Label for the "See it" button (default: "See it in action") */
+    label?: string;
+    /** Accent color for the hint animation */
+    color?: string;
+    /**
+     * Variables to reset before showing the hint.
+     * Useful for ensuring the visualization starts in a state where the
+     * guided hint makes sense.
+     * @example { fbDemoAmplitude: 1.0 }
+     */
+    resetVars?: Record<string, number | string | boolean>;
+}
+
 export interface InlineFeedbackProps {
     /** Variable name to watch in the store (must match the cloze component's varName) */
     varName: string;
-    /** Expected correct value (compared against the store value) */
-    correctValue: string;
+    /**
+     * Expected correct value(s), compared against the store value.
+     * Accepts a single string, pipe-separated alternates (e.g. "first | 1 | 1st"),
+     * or an array of accepted answers — must mirror the cloze component's `correctAnswer`.
+     */
+    correctValue: string | string[];
     /** Case-sensitive comparison (default: false) */
     caseSensitive?: boolean;
     /**
@@ -34,6 +72,17 @@ export interface InlineFeedbackProps {
     reviewBlockId?: string;
     /** Label for the review link (default: "Review this concept") */
     reviewLabel?: string;
+    /**
+     * Section links — clickable links to navigate to specific lesson sections.
+     * Each link scrolls to the target block and highlights it briefly.
+     */
+    sectionLinks?: SectionLink[];
+    /**
+     * Visualization hint config — when a wrong answer is given, the student
+     * can click a button to navigate to a visualization and see an animated
+     * hint showing exactly how to explore the concept interactively.
+     */
+    visualizationHint?: VisualizationHintConfig;
     /** The inline content (e.g., "The diameter is {cloze}.") */
     children: React.ReactNode;
     /** Custom class name for the wrapper */
@@ -43,6 +92,11 @@ export interface InlineFeedbackProps {
 /**
  * Scroll smoothly to a block and briefly flash a highlight ring.
  */
+// Submissions per answer box since this page loaded (reported as `attempt`).
+const submissionCounts = new Map<string, number>();
+// Last value each answer box reported to the embedding page (per page load).
+const lastReported = new Map<string, string>();
+
 const scrollToBlock = (blockId: string) => {
     const el = document.querySelector(`[data-block-id="${blockId}"]`);
     if (el) {
@@ -53,79 +107,162 @@ const scrollToBlock = (blockId: string) => {
 };
 
 /**
- * Get default messages based on position.
- * - Terminal/Standalone: More detailed defaults
- * - Mid: Ultra-brief defaults to maintain sentence flow
+ * Scroll to a visualization block and dispatch a custom event
+ * to trigger the InteractionHintSequence on that block.
  */
-const getDefaultMessages = (position: FeedbackPosition) => {
-    switch (position) {
-        case 'mid':
-            return {
-                success: '✓',
-                failure: '✗',
-            };
-        case 'standalone':
-            return {
-                success: "That's right!",
-                failure: 'Not quite!',
-            };
-        case 'terminal':
-        default:
-            return {
-                success: "— exactly right!",
-                failure: "— not quite.",
-            };
+const scrollToVisualizationAndTriggerHint = (config: VisualizationHintConfig) => {
+    document.dispatchEvent(new CustomEvent('dismiss-interaction-hints'));
+
+    if (config.resetVars) {
+        const setVar = useVariableStore.getState().setVariable;
+        for (const [name, value] of Object.entries(config.resetVars)) {
+            setVar(name, value);
+        }
+    }
+
+    const el = document.querySelector(`[data-block-id="${config.blockId}"]`);
+    if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        el.classList.add('ring-2', 'ring-emerald-400/60', 'ring-offset-2', 'ring-offset-emerald-50/30');
+        setTimeout(() => {
+            el.classList.remove('ring-2', 'ring-emerald-400/60', 'ring-offset-2', 'ring-offset-emerald-50/30');
+        }, 3500);
+
+        setTimeout(() => {
+            const event = new CustomEvent('trigger-viz-hint', {
+                detail: {
+                    hintKey: config.hintKey,
+                    steps: config.steps,
+                    color: config.color,
+                },
+                bubbles: true,
+            });
+            el.dispatchEvent(event);
+        }, 600);
     }
 };
 
-/**
- * InlineFeedback
- *
- * Shows instant feedback right next to the cloze input or choice as natural
- * flowing text. Blends seamlessly with the paragraph content. Designed to be
- * encouraging and educational — celebrating correct answers and guiding
- * students toward understanding when they need another try.
- *
- * **Position matters:**
- * - 'terminal': Blank ends the sentence → detailed feedback allowed
- * - 'mid': Blank mid-sentence → ultra-brief feedback (✓/✗ by default)
- * - 'standalone': Question ends with ? → conversational feedback
- *
- * Note: Avoid trailing periods in messages since the paragraph usually ends with one.
- *
- * @example Terminal position (blank at end):
- * ```tsx
- * <EditableParagraph>
- *   A circle with radius 3 has diameter{" "}
- *   <InlineFeedback
- *     varName="answer_diameter"
- *     correctValue="6"
- *     position="terminal"
- *     successMessage="— exactly! Diameter is always twice the radius"
- *     failureMessage="— not quite."
- *     hint="The diameter stretches all the way across"
- *   >
- *     <InlineClozeInput varName="answer_diameter" correctAnswer="6" />
- *   </InlineFeedback>.
- * </EditableParagraph>
- * ```
- *
- * @example Mid-sentence position (words after blank):
- * ```tsx
- * <EditableParagraph>
- *   An interior cell has exactly{" "}
- *   <InlineFeedback
- *     varName="answer_neighbors"
- *     correctValue="4"
- *     position="mid"
- *   >
- *     <InlineClozeInput varName="answer_neighbors" correctAnswer="4" />
- *   </InlineFeedback>{" "}
- *   neighbors.
- * </EditableParagraph>
- * // Renders: "...has exactly 4 ✓ neighbors."
- * ```
- */
+const getDefaultMessages = (position: FeedbackPosition) => {
+    switch (position) {
+        case 'mid':
+            return { success: '✓', failure: '✗' };
+        case 'standalone':
+            return { success: "That's right!", failure: 'Not quite!' };
+        case 'terminal':
+        default:
+            return { success: "— exactly right!", failure: "— not quite." };
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FeedbackSectionLink — clickable span that navigates to a lesson section.
+// Uses onMouseDown (not onClick) to work inside contentEditable regions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FeedbackSectionLink: React.FC<{ link: SectionLink; isEditing: boolean }> = ({ link, isEditing }) => {
+    const [hovered, setHovered] = useState(false);
+
+    const handleInteraction = useCallback((e: React.MouseEvent | React.KeyboardEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        scrollToBlock(link.blockId);
+    }, [link.blockId]);
+
+    return (
+        <span
+            role="button"
+            tabIndex={0}
+            onMouseDown={handleInteraction}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') handleInteraction(e);
+            }}
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+            style={{
+                display: 'inline',
+                color: '#2563eb',
+                fontWeight: 500,
+                cursor: 'pointer',
+                borderBottom: '2px solid #2563eb',
+                paddingBottom: '1px',
+                background: hovered ? 'rgba(37, 99, 235, 0.12)' : 'transparent',
+                borderRadius: hovered ? '3px 3px 0 0' : '0',
+                transition: 'background 0.15s ease',
+                userSelect: 'none',
+            }}
+        >
+            {link.label}
+        </span>
+    );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FeedbackVizHintButton — styled "button" that triggers the visualization hint.
+// Uses onMouseDown to work inside contentEditable regions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FeedbackVizHintButton: React.FC<{
+    label: string;
+    triggered: boolean;
+    onClick: () => void;
+    isEditing: boolean;
+}> = ({ label, triggered, onClick, isEditing }) => {
+    const [hovered, setHovered] = useState(false);
+
+    const bgColor = triggered
+        ? '#f1f5f9'
+        : hovered
+            ? '#f5f5f5'
+            : '#ffffff';
+    const textColor = triggered ? '#94a3b8' : '#1f2937';
+    const borderColor = triggered ? '#e2e8f0' : hovered ? '#374151' : '#4b5563';
+
+    const handleInteraction = useCallback((e: React.MouseEvent | React.KeyboardEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!triggered) onClick();
+    }, [triggered, onClick]);
+
+    return (
+        <span
+            role="button"
+            tabIndex={0}
+            onMouseDown={handleInteraction}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') handleInteraction(e);
+            }}
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+            style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '4px 12px',
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontWeight: 600,
+                lineHeight: '1.4',
+                cursor: triggered ? 'default' : 'pointer',
+                backgroundColor: bgColor,
+                color: textColor,
+                border: `1px solid ${borderColor}`,
+                boxShadow: triggered
+                    ? 'none'
+                    : '0 1px 2px rgba(0, 0, 0, 0.05)',
+                transition: 'all 0.15s ease',
+                userSelect: 'none',
+                verticalAlign: 'middle',
+            }}
+        >
+            <span>{triggered ? 'Showing hint…' : label}</span>
+        </span>
+    );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// InlineFeedback — main component
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const InlineFeedback: React.FC<InlineFeedbackProps> = ({
     varName,
     correctValue,
@@ -136,72 +273,234 @@ export const InlineFeedback: React.FC<InlineFeedbackProps> = ({
     hint,
     reviewBlockId,
     reviewLabel = 'Review this concept',
+    sectionLinks,
+    visualizationHint,
     children,
     className,
 }) => {
     const storeValue = useVar(varName, '') as string;
+    const restoredAnswer = useRef(isRestoredAnswer(varName, storeValue) ? storeValue : undefined);
     const defaults = getDefaultMessages(position);
+    const [vizHintTriggered, setVizHintTriggered] = useState(false);
+    const feedbackRef = useRef<HTMLSpanElement>(null);
+    const inlineIdRef = useRef(`feedback-${varName}`);
+    const [visible, setVisible] = useState(false);
 
-    // Use provided messages or position-appropriate defaults
-    const effectiveSuccessMessage = successMessage ?? defaults.success;
-    const effectiveFailureMessage = failureMessage ?? defaults.failure;
+    // Detect edit mode
+    const { isEditor } = useAppMode();
+    const { isEditing, pendingEdits } = useEditing();
+    const isStandalone = typeof window !== 'undefined' && window.self === window.top;
+    const canEdit = isEditor || isStandalone;
+    const inEditMode = canEdit && isEditing;
+
+    // The cloze editors edit this wrapper's messages (see feedbackContext): a
+    // pending edit of the cloze watching our variable carries the new text.
+    const pendingFeedback = React.useMemo(() => {
+        for (let i = pendingEdits.length - 1; i >= 0; i--) {
+            const edit = pendingEdits[i] as {
+                type: string;
+                originalProps?: { varName?: string };
+                newProps?: { feedback?: ClozeFeedback };
+            };
+            if ((edit.type === 'clozeChoice' || edit.type === 'clozeInput') &&
+                edit.originalProps?.varName === varName && edit.newProps?.feedback) {
+                return edit.newProps.feedback;
+            }
+        }
+        return null;
+    }, [pendingEdits, varName]);
+    const sourceFeedback: ClozeFeedback = React.useMemo(() => ({
+        successMessage: successMessage ?? '',
+        failureMessage: failureMessage ?? '',
+        hint: hint ?? '',
+    }), [successMessage, failureMessage, hint]);
+    const feedback = pendingFeedback ?? sourceFeedback;
+    // An emptied message falls back to the position's default, as when absent.
+    const effectiveSuccessMessage = feedback.successMessage || defaults.success;
+    const effectiveFailureMessage = feedback.failureMessage || defaults.failure;
+    const effectiveHint = feedback.hint;
+    const componentProps = React.useMemo(() => {
+        const json = JSON.stringify({
+            varName,
+            correctValue,
+            caseSensitive,
+            position,
+            successMessage,
+            failureMessage,
+            hint,
+            reviewBlockId,
+            reviewLabel,
+            sectionLinks,
+            visualizationHint,
+            className,
+        });
+        try { return encodeMarkerJson(json); } catch { return ''; }
+    }, [
+        varName, correctValue, caseSensitive, position, successMessage,
+        failureMessage, hint, reviewBlockId, reviewLabel, sectionLinks,
+        visualizationHint, className,
+    ]);
 
     const hasAnswer = storeValue.trim() !== '';
-    const isCorrect =
-        hasAnswer &&
-        (caseSensitive
-            ? storeValue.trim() === correctValue.trim()
-            : storeValue.trim().toLowerCase() === correctValue.trim().toLowerCase());
+    const isCorrect = hasAnswer && isAnswerCorrect(storeValue, correctValue, caseSensitive);
 
-    // For mid-position, hints appear but are kept brief
-    // For terminal/standalone, hints can be more detailed
-    const showHint = hint && !isCorrect && hasAnswer;
+    const showHint = effectiveHint && !isCorrect && hasAnswer;
     const showReviewLink = reviewBlockId && !isCorrect && hasAnswer;
+    const showSectionLinks = sectionLinks && sectionLinks.length > 0 && !isCorrect && hasAnswer;
+    const showVizHint = visualizationHint && !isCorrect && hasAnswer;
 
-    // Determine if we should show detailed feedback or just symbols
     const isCompact = position === 'mid';
 
-    return (
-        <span className={cn("inline", className)}>
-            {/* The cloze component */}
-            {children}
+    // Fade-in animation
+    useEffect(() => {
+        if (hasAnswer) {
+            const raf = requestAnimationFrame(() => setVisible(true));
+            return () => cancelAnimationFrame(raf);
+        }
+        setVisible(false);
+    }, [hasAnswer]);
 
-            {/* Inline feedback - appears right after the cloze component as flowing text */}
-            <AnimatePresence>
-                {hasAnswer && (
-                    <motion.span
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.2, ease: 'easeOut' }}
-                    >
-                        {isCorrect ? (
-                            // Correct feedback — flows naturally as text
-                            <span className="text-green-700 dark:text-green-400">
-                                {" "}{effectiveSuccessMessage}
-                            </span>
-                        ) : (
-                            // Incorrect feedback — hint flows as text
-                            <span className="text-amber-700 dark:text-amber-400">
+    // Report answer correctness to the embedding page (tutor chat) so it can
+    // react instantly (avatar celebration/encouragement) without waiting for
+    // the tutor agent's reply. No-op when not embedded in an iframe.
+    useEffect(() => {
+        // Mounting a saved answer is not a new student submission.
+        if (restoredAnswer.current !== undefined && restoredAnswer.current === storeValue) return;
+        restoredAnswer.current = undefined;
+        if (!hasAnswer) {
+            // Cleared: the next value is a fresh submission again.
+            lastReported.delete(varName);
+            return;
+        }
+        // A remount (the explorable re-rendered, was docked or undocked) sees
+        // the same value already in the store: it was reported when the
+        // student chose it, and reporting it again made the tutor react to
+        // a submission that never happened.
+        if (lastReported.get(varName) === storeValue) return;
+        lastReported.set(varName, storeValue);
+        if (window.parent === window) return;
+        const explorableId = new URLSearchParams(window.location.search).get('explorable') ?? undefined;
+        const attempt = (submissionCounts.get(varName) ?? 0) + 1;
+        submissionCounts.set(varName, attempt);
+        window.parent.postMessage(
+            {
+                type: 'mathvibe-explorable-feedback',
+                explorableId,
+                varName,
+                value: storeValue,
+                correct: isCorrect,
+                interactionKind: 'answer',
+                at: Date.now(),
+                // 1-based submission number for this answer box since the
+                // page loaded — lets the dashboard tell first tries from retries.
+                attempt,
+            },
+            '*'
+        );
+    }, [hasAnswer, isCorrect, storeValue, varName]);
+
+    const handleVizHintClick = useCallback(() => {
+        if (!visualizationHint) return;
+        setVizHintTriggered(true);
+        scrollToVisualizationAndTriggerHint(visualizationHint);
+        setTimeout(() => setVizHintTriggered(false), 5000);
+    }, [visualizationHint]);
+
+    useEffect(() => {
+        setVizHintTriggered(false);
+    }, [storeValue]);
+
+    const handleReviewClick = useCallback((e: React.MouseEvent | React.KeyboardEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (reviewBlockId) scrollToBlock(reviewBlockId);
+    }, [reviewBlockId]);
+
+    return (
+        <span
+            className={cn("inline", className)}
+            data-inline-component="inlineFeedback"
+            data-component-id={inlineIdRef.current}
+            data-component-props={componentProps}
+        >
+            <InlineFeedbackContext.Provider value={feedback}>
+                {children}
+            </InlineFeedbackContext.Provider>
+
+            {hasAnswer && (
+                <span
+                    ref={feedbackRef}
+                    data-inline-component="inlineFeedbackResult"
+                    contentEditable={false}
+                    style={{
+                        opacity: visible ? 1 : 0,
+                        transition: 'opacity 0.2s ease-out',
+                        display: 'inline',
+                    }}
+                >
+                    {isCorrect ? (
+                        <span style={{ color: '#15803d' }}>
+                            {" "}{effectiveSuccessMessage}
+                        </span>
+                    ) : (
+                        <span style={{ display: 'inline' }}>
+                            {/* Failure message + hint text */}
+                            <span style={{ color: '#b45309' }}>
                                 {" "}{effectiveFailureMessage}
-                                {showHint && (
-                                    <span>
-                                        {isCompact ? ` ${hint}` : ` ${hint}`}
-                                    </span>
-                                )}
-                                {showReviewLink && (
-                                    <button
-                                        onClick={() => scrollToBlock(reviewBlockId)}
-                                        className="ml-1 text-blue-600 dark:text-blue-400 hover:underline transition-colors"
-                                    >
-                                        {reviewLabel}
-                                    </button>
-                                )}
+                                {showHint && <span>{` ${effectiveHint}`}</span>}
                             </span>
-                        )}
-                    </motion.span>
-                )}
-            </AnimatePresence>
+
+                            {/* Section links */}
+                            {showSectionLinks && !isCompact && (
+                                <span style={{ display: 'inline' }}>
+                                    {' '}
+                                    {sectionLinks!.map((link, idx) => (
+                                        <React.Fragment key={`${link.blockId}-${idx}`}>
+                                            {idx > 0 ? ' ' : ''}
+                                            <FeedbackSectionLink link={link} isEditing={inEditMode} />
+                                        </React.Fragment>
+                                    ))}
+                                </span>
+                            )}
+
+                            {/* Legacy review link (backwards compatible) */}
+                            {showReviewLink && !showSectionLinks && (
+                                <span
+                                    role="button"
+                                    tabIndex={0}
+                                    onMouseDown={handleReviewClick}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') handleReviewClick(e);
+                                    }}
+                                    style={{
+                                        marginLeft: '4px',
+                                        color: '#2563eb',
+                                        cursor: 'pointer',
+                                        fontWeight: 500,
+                                        borderBottom: '2px solid #2563eb',
+                                        paddingBottom: '1px',
+                                        userSelect: 'none',
+                                    }}
+                                >
+                                    {reviewLabel}
+                                </span>
+                            )}
+
+                            {/* Visualization hint CTA */}
+                            {showVizHint && !isCompact && (
+                                <span style={{ marginLeft: '8px', display: 'inline' }}>
+                                    <FeedbackVizHintButton
+                                        label={visualizationHint!.label ?? 'See it in action'}
+                                        triggered={vizHintTriggered}
+                                        onClick={handleVizHintClick}
+                                        isEditing={inEditMode}
+                                    />
+                                </span>
+                            )}
+                        </span>
+                    )}
+                </span>
+            )}
         </span>
     );
 };

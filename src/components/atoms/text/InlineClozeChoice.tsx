@@ -2,11 +2,13 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion';
 import { X } from 'lucide-react';
 import { useVar, useSetVar } from '@/stores/variableStore';
-import { cn } from '@/lib/utils';
+import { cn, isAnswerCorrect } from '@/lib/utils';
+import { encodeMarkerJson } from '@/lib/inlineMarkers';
 import { useEditing } from '@/contexts/EditingContext';
 import { useAppMode } from '@/contexts/AppModeContext';
 import { useBlockContext } from '@/contexts/BlockContext';
 import { useComponentHint, HintIcon } from './InlineInteractionHint';
+import { useClozeFeedback } from './feedbackContext';
 
 interface InlineClozeChoiceProps {
     /** Unique identifier for this component instance */
@@ -72,7 +74,8 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
     showHint = true,
 }) => {
     const containerRef = useRef<HTMLSpanElement>(null);
-    const dropdownRef = useRef<HTMLDivElement>(null);
+    const inlineIdRef = useRef(id || `choice-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`);
+    const dropdownRef = useRef<HTMLSpanElement>(null);
 
     // ── Interaction Hint System ──
     const { hintVisible, dismissHint } = useComponentHint('cloze-choice', { enabled: showHint });
@@ -81,6 +84,8 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
     const { isEditor } = useAppMode();
     const { isEditing, openClozeChoiceEditor, pendingEdits } = useEditing();
     const { id: blockIdFromContext } = useBlockContext();
+    // answer feedback of the InlineFeedback around this blank, edited alongside it
+    const clozeFeedback = useClozeFeedback();
 
     const isStandalone = typeof window !== 'undefined' && window.self === window.top;
     const canEdit = isEditor || isStandalone;
@@ -90,7 +95,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
 
     useEffect(() => {
         if (blockIdFromContext) {
-            const elementPath = `choice-${blockIdFromContext}-${varName ?? correctAnswer}`;
+            const elementPath = `choice-${blockIdFromContext}-${inlineIdRef.current}`;
             setEditIdentity({ blockId: blockIdFromContext, elementPath });
             return;
         }
@@ -98,7 +103,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
 
         const block = containerRef.current.closest('[data-block-id]');
         const blockId = block?.getAttribute('data-block-id') || '';
-        const elementPath = `choice-${blockId}-${varName ?? correctAnswer}`;
+        const elementPath = `choice-${blockId}-${inlineIdRef.current}`;
         setEditIdentity({ blockId, elementPath });
     }, [blockIdFromContext, varName, correctAnswer]);
 
@@ -111,7 +116,9 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
         const edit = [...pendingEdits].reverse().find(e =>
             e.type === 'clozeChoice' &&
             (e as any).blockId === blockId &&
-            (e as any).elementPath === elementPath
+            ((e as any).componentId
+                ? (e as any).componentId === inlineIdRef.current
+                : (e as any).elementPath === elementPath)
         );
 
         return edit as { newProps: { varName?: string; correctAnswer?: string; options?: string[]; placeholder?: string; color?: string; bgColor?: string } } | null;
@@ -132,6 +139,61 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
     // Local state for component without varName
     const [localValue, setLocalValue] = useState<string | null>(null);
     const [isOpen, setIsOpen] = useState(false);
+    // The menu hangs off the trigger's left edge. For a blank near the end of
+    // a line it would run past the right edge of the page — inside the tutor
+    // chat's iframe that edge clips it — so it hangs off the right edge
+    // instead. Likewise a blank on the last line of a frame drops its menu
+    // below the visible area (the editor's preview frame, or the chat frame
+    // before it grows), so it opens upward when there is room above and not
+    // below. Decided from layout sizes (unaffected by the open animation's
+    // scale) the moment the menu mounts, and reset on close.
+    //
+    // The frame can also be cut off from OUTSIDE: the tutor chat's transcript
+    // or the editor's pane shows only part of a taller iframe, and nothing in
+    // this document can measure that. An IntersectionObserver without a root
+    // can — it reports what is really on screen, clipping by the embedding
+    // page included — so a menu cut off at the bottom flips up as well.
+    const [alignRight, setAlignRight] = useState(false);
+    const [openUp, setOpenUp] = useState(false);
+    const menuObserver = useRef<IntersectionObserver | null>(null);
+    const menuRef = useCallback((menu: HTMLElement | null) => {
+        menuObserver.current?.disconnect();
+        menuObserver.current = null;
+        if (!menu) { setAlignRight(false); setOpenUp(false); return; }
+        const anchor = dropdownRef.current;
+        if (!anchor) return;
+        const rect = anchor.getBoundingClientRect();
+        const available = document.documentElement.clientWidth - 4;
+        setAlignRight(rect.left + menu.offsetWidth > available && rect.left + anchor.offsetWidth > menu.offsetWidth);
+        const needed = menu.offsetHeight + 8;
+        const roomAbove = rect.top >= needed;
+        if (window.innerHeight - rect.bottom < needed && roomAbove) {
+            setOpenUp(true);
+            return;
+        }
+        if (!roomAbove || typeof IntersectionObserver === 'undefined') return;
+        const observer = new IntersectionObserver(([entry]) => {
+            observer.disconnect();
+            const cutAtBottom =
+                entry.intersectionRatio < 0.99 &&
+                entry.intersectionRect.bottom < entry.boundingClientRect.bottom - 1;
+            if (cutAtBottom) setOpenUp(true);
+        }, { threshold: [0, 0.99, 1] });
+        observer.observe(menu);
+        menuObserver.current = observer;
+    }, []);
+    useEffect(() => () => menuObserver.current?.disconnect(), []);
+    const menuClassName = cn(
+        "absolute inline-block rounded-lg overflow-hidden z-50 w-auto min-w-[80px] max-w-[300px]",
+        openUp ? "bottom-full mb-1" : "top-full mt-1",
+        alignRight ? "right-0" : "left-0",
+    );
+    const menuMotion = {
+        initial: { opacity: 0, y: openUp ? 4 : -4, scale: 0.97 },
+        animate: { opacity: 1, y: 0, scale: 1 },
+        exit: { opacity: 0, y: openUp ? 4 : -4, scale: 0.97 },
+        transition: { duration: 0.12, ease: [0.4, 0, 0.2, 1] as const },
+    };
     const [isHovered, setIsHovered] = useState(false);
 
     // Determine which value to use
@@ -139,7 +201,8 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
     const rawSelectedValue = usesVarStore ? storeValue : localValue;
     const selectedValue = typeof rawSelectedValue === 'string' && rawSelectedValue !== '' ? rawSelectedValue : null;
 
-    const isCorrect = selectedValue === effectiveCorrectAnswer;
+    // Accepts the same answer forms as InlineFeedback: one value or a pipe list ("a | b").
+    const isCorrect = selectedValue !== null && isAnswerCorrect(selectedValue, effectiveCorrectAnswer);
 
     const setSelectedValue = useCallback((val: string | null) => {
         if (usesVarStore && effectiveVarName) {
@@ -169,7 +232,6 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
     }, [isOpen]);
 
     // Stable ID and serialized props for round-trip extraction (base64 for HTML attribute safety)
-    const inlineIdRef = useRef(id || varName || `choice-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`);
     const componentProps = useMemo(() => {
         const json = JSON.stringify({
             varName: effectiveVarName,
@@ -179,7 +241,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
             color: effectiveColor,
             bgColor: effectiveBgColor,
         });
-        try { return btoa(json); } catch { return ''; }
+        try { return encodeMarkerJson(json); } catch { return ''; }
     }, [effectiveVarName, effectiveCorrectAnswer, effectiveOptions, effectivePlaceholder, effectiveColor, effectiveBgColor]);
 
     const handleEditClick = useCallback((e: React.MouseEvent) => {
@@ -192,7 +254,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
         if (!elementPath) {
             const block = containerRef.current?.closest('[data-block-id]');
             blockId = blockId || block?.getAttribute('data-block-id') || '';
-            elementPath = `choice-${blockId}-${varName ?? correctAnswer}`;
+            elementPath = `choice-${blockId}-${inlineIdRef.current}`;
         }
 
         openClozeChoiceEditor(
@@ -203,11 +265,13 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
                 placeholder: effectivePlaceholder,
                 color: effectiveColor,
                 bgColor: effectiveBgColor,
+                componentId: inlineIdRef.current,
+                ...(clozeFeedback ? { feedback: clozeFeedback } : {}),
             },
             blockId,
             elementPath
         );
-    }, [editIdentity, blockIdFromContext, effectiveVarName, effectiveCorrectAnswer, effectiveOptions, effectivePlaceholder, effectiveColor, effectiveBgColor, openClozeChoiceEditor, varName, correctAnswer]);
+    }, [editIdentity, blockIdFromContext, effectiveVarName, effectiveCorrectAnswer, effectiveOptions, effectivePlaceholder, effectiveColor, effectiveBgColor, openClozeChoiceEditor, varName, correctAnswer, clozeFeedback]);
 
     const handleMouseDown = (e: React.MouseEvent) => {
         if (canEdit && isEditing && !disableEditing) {
@@ -217,7 +281,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
     };
 
     const handleSelect = (option: string) => {
-        const correct = option === effectiveCorrectAnswer;
+        const correct = isAnswerCorrect(option, effectiveCorrectAnswer);
         setSelectedValue(option);
         setIsOpen(false);
         onChange?.(option, correct);
@@ -332,12 +396,10 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
 
                     <AnimatePresence>
                         {isOpen && (
-                            <motion.div
-                                initial={{ opacity: 0, y: -4, scale: 0.97 }}
-                                animate={{ opacity: 1, y: 0, scale: 1 }}
-                                exit={{ opacity: 0, y: -4, scale: 0.97 }}
-                                transition={{ duration: 0.12, ease: [0.4, 0, 0.2, 1] }}
-                                className="absolute top-full left-0 mt-1 rounded-lg overflow-hidden z-50 w-auto min-w-[80px] max-w-[300px]"
+                            <motion.span
+                                ref={menuRef}
+                                {...menuMotion}
+                                className={menuClassName}
                                 style={{
                                     background: 'white',
                                     boxShadow: '0 4px 20px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05)',
@@ -366,7 +428,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
                                         </button>
                                     );
                                 })}
-                            </motion.div>
+                            </motion.span>
                         )}
                     </AnimatePresence>
                 </span>
@@ -399,12 +461,10 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
 
                 <AnimatePresence>
                     {isOpen && (
-                        <motion.div
-                            initial={{ opacity: 0, y: -4, scale: 0.97 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: -4, scale: 0.97 }}
-                            transition={{ duration: 0.12, ease: [0.4, 0, 0.2, 1] }}
-                            className="absolute top-full left-0 mt-1 rounded-lg overflow-hidden z-50 w-auto min-w-[80px] max-w-[300px]"
+                        <motion.span
+                            ref={menuRef}
+                            {...menuMotion}
+                            className={menuClassName}
                             style={{
                                 background: 'white',
                                 boxShadow: '0 4px 20px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05)',
@@ -433,7 +493,7 @@ export const InlineClozeChoice: React.FC<InlineClozeChoiceProps> = ({
                                     </button>
                                 );
                             })}
-                        </motion.div>
+                        </motion.span>
                     )}
                 </AnimatePresence>
             </span>
